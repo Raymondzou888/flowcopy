@@ -1,4 +1,4 @@
-"""FlowCopy Backend - AI Marketing Content Generator (Full Version)"""
+"""FlowCopy Backend - AI Marketing Content Generator (Production-Ready)"""
 
 from __future__ import annotations
 
@@ -6,16 +6,19 @@ import os
 import json
 import base64
 import uuid
+import time
+import logging
 import httpx
 from pathlib import Path
 from datetime import datetime, timedelta
+from collections import defaultdict
 
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Header
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from openai import OpenAI
+from openai import OpenAI, APITimeoutError, APIConnectionError, APIStatusError
 from dotenv import load_dotenv
 from jose import jwt, JWTError
 import bcrypt
@@ -23,6 +26,15 @@ import bcrypt
 import db
 
 load_dotenv()
+
+# ── Logging ──
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("flowcopy")
 
 # ── App setup ──
 
@@ -37,10 +49,34 @@ app.add_middleware(
 )
 
 db.init_db()
+logger.info("Database initialized")
 
 # Create uploads directory
 UPLOAD_DIR = Path(__file__).parent / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
+
+
+# ── Simple in-memory rate limiter ──
+
+class RateLimiter:
+    """Simple per-IP rate limiter. Resets every window_seconds."""
+
+    def __init__(self, max_requests: int = 30, window_seconds: int = 60):
+        self.max_requests = max_requests
+        self.window = window_seconds
+        self.requests: dict[str, list[float]] = defaultdict(list)
+
+    def is_allowed(self, ip: str) -> bool:
+        now = time.time()
+        # Clean old entries
+        self.requests[ip] = [t for t in self.requests[ip] if now - t < self.window]
+        if len(self.requests[ip]) >= self.max_requests:
+            return False
+        self.requests[ip].append(now)
+        return True
+
+
+rate_limiter = RateLimiter(max_requests=30, window_seconds=60)
 
 # ── Auth setup ──
 
@@ -57,30 +93,37 @@ def hash_password(password: str) -> str:
 def verify_password(password: str, hashed: str) -> bool:
     return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
 
+
 # ── AI Client (OpenRouter - free models) ──
 # OpenRouter is OpenAI-SDK compatible, just different base_url + model names
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "mistralai/mistral-7b-instruct:free")
 OPENROUTER_VISION_MODEL = os.getenv("OPENROUTER_VISION_MODEL", "google/gemini-2.0-flash-exp:free")
+AI_TIMEOUT = int(os.getenv("AI_TIMEOUT", "60"))  # seconds
 
 _ai_client = None
 
+
 def get_ai_client() -> OpenAI:
-    """Lazy-init OpenRouter client (OpenAI-compatible)."""
+    """Lazy-init OpenRouter client (OpenAI-compatible) with timeout protection."""
     global _ai_client
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
+        logger.error("OPENROUTER_API_KEY is not set!")
         raise HTTPException(status_code=500, detail="OPENROUTER_API_KEY not configured on server")
     if _ai_client is None:
         _ai_client = OpenAI(
             base_url=OPENROUTER_BASE_URL,
             api_key=api_key,
+            timeout=AI_TIMEOUT,
+            max_retries=2,
             default_headers={
                 "HTTP-Referer": os.getenv("APP_URL", "https://flowcopy.app"),
                 "X-Title": "FlowCopy",
             },
         )
+        logger.info(f"AI client initialized | model={OPENROUTER_MODEL} | timeout={AI_TIMEOUT}s")
     return _ai_client
 
 
@@ -110,6 +153,24 @@ def require_admin(user: dict = Depends(get_current_user)) -> dict:
     return user
 
 
+# ── Rate limit middleware ──
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    # Only rate-limit API endpoints, not static files
+    if request.url.path.startswith("/api/"):
+        client_ip = request.client.host if request.client else "unknown"
+        if not rate_limiter.is_allowed(client_ip):
+            logger.warning(f"Rate limit exceeded for IP: {client_ip}")
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Too many requests. Please wait and try again."},
+            )
+    response = await call_next(request)
+    return response
+
+
 # ── Auth endpoints ──
 
 class RegisterInput(BaseModel):
@@ -123,8 +184,23 @@ class LoginInput(BaseModel):
     password: str
 
 
+def _make_user_response(user: dict, token: str) -> dict:
+    return {
+        "token": token,
+        "user": {
+            "id": user["id"],
+            "email": user["email"],
+            "display_name": user["display_name"],
+            "is_admin": bool(user["is_admin"]),
+            "free_credits": user["free_credits"],
+            "paid_credits": user["paid_credits"],
+        },
+    }
+
+
 @app.post("/api/register")
 async def register(data: RegisterInput):
+    logger.info(f"Registration attempt: {data.email}")
     if len(data.password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
     if db.get_user_by_email(data.email):
@@ -136,36 +212,20 @@ async def register(data: RegisterInput):
         db.set_admin(user["id"], True)
         user["is_admin"] = 1
     token = create_token(user["id"], user["email"])
-    return {
-        "token": token,
-        "user": {
-            "id": user["id"],
-            "email": user["email"],
-            "display_name": user["display_name"],
-            "is_admin": bool(user["is_admin"]),
-            "free_credits": user["free_credits"],
-            "paid_credits": user["paid_credits"],
-        },
-    }
+    logger.info(f"User registered: id={user['id']} email={data.email}")
+    return _make_user_response(user, token)
 
 
 @app.post("/api/login")
 async def login(data: LoginInput):
+    logger.info(f"Login attempt: {data.email}")
     user = db.get_user_by_email(data.email)
     if not user or not verify_password(data.password, user["password_hash"]):
+        logger.warning(f"Failed login attempt: {data.email}")
         raise HTTPException(status_code=401, detail="Invalid email or password")
     token = create_token(user["id"], user["email"])
-    return {
-        "token": token,
-        "user": {
-            "id": user["id"],
-            "email": user["email"],
-            "display_name": user["display_name"],
-            "is_admin": bool(user["is_admin"]),
-            "free_credits": user["free_credits"],
-            "paid_credits": user["paid_credits"],
-        },
-    }
+    logger.info(f"User logged in: id={user['id']} email={data.email}")
+    return _make_user_response(user, token)
 
 
 @app.get("/api/me")
@@ -187,28 +247,16 @@ class GoogleLoginInput(BaseModel):
     credential: str  # Google ID token
 
 
-def _make_user_response(user: dict, token: str) -> dict:
-    return {
-        "token": token,
-        "user": {
-            "id": user["id"],
-            "email": user["email"],
-            "display_name": user["display_name"],
-            "is_admin": bool(user["is_admin"]),
-            "free_credits": user["free_credits"],
-            "paid_credits": user["paid_credits"],
-        },
-    }
-
-
 @app.post("/api/auth/google")
 async def google_login(data: GoogleLoginInput):
+    logger.info("Google login attempt")
     # Verify Google token via Google's API
-    async with httpx.AsyncClient() as client_http:
+    async with httpx.AsyncClient(timeout=10) as client_http:
         resp = await client_http.get(
             f"https://oauth2.googleapis.com/tokeninfo?id_token={data.credential}"
         )
     if resp.status_code != 200:
+        logger.warning("Invalid Google token received")
         raise HTTPException(status_code=401, detail="Invalid Google token")
 
     info = resp.json()
@@ -224,13 +272,15 @@ async def google_login(data: GoogleLoginInput):
     # Find or create user
     user = db.get_user_by_email(email)
     if not user:
-        # Create user with a random password (they'll use Google to login)
         random_pw = uuid.uuid4().hex
         password_hash = hash_password(random_pw)
         user = db.create_user(email, password_hash, name)
         if user["id"] == 1 or email == ADMIN_EMAIL:
             db.set_admin(user["id"], True)
             user["is_admin"] = 1
+        logger.info(f"New Google user created: {email}")
+    else:
+        logger.info(f"Google user logged in: {email}")
 
     token = create_token(user["id"], user["email"])
     return _make_user_response(user, token)
@@ -250,6 +300,7 @@ async def guest_login():
     db.use_credit(user["id"])  # 3 -> 2
     token = create_token(user["id"], user["email"])
     user = db.get_user_by_id(user["id"])
+    logger.info(f"Guest user created: {email} (2 credits)")
     return _make_user_response(user, token)
 
 
@@ -320,7 +371,7 @@ CHANNEL_LABELS = {
 }
 
 
-# ── Generate endpoint ──
+# ── Generate endpoint (production-hardened) ──
 
 class ProductInput(BaseModel):
     product_name: str
@@ -334,18 +385,29 @@ class ProductInput(BaseModel):
 
 
 @app.post("/api/generate")
-async def generate_content(product: ProductInput, user: dict = Depends(get_current_user)):
+async def generate_content(request: Request, product: ProductInput, user: dict = Depends(get_current_user)):
+    client_ip = request.client.host if request.client else "unknown"
+    logger.info(f"Generate request | user={user['id']} | ip={client_ip} | channels={product.channels}")
+
     if not os.getenv("OPENROUTER_API_KEY"):
         raise HTTPException(status_code=500, detail="OPENROUTER_API_KEY not configured")
+
+    # Validate input
+    if not product.product_name or not product.product_name.strip():
+        raise HTTPException(status_code=400, detail="Product name is required")
+    if not product.product_description or not product.product_description.strip():
+        raise HTTPException(status_code=400, detail="Product description is required")
+    if not product.channels:
+        raise HTTPException(status_code=400, detail="At least one channel is required")
+    if len(product.channels) > 6:
+        raise HTTPException(status_code=400, detail="Maximum 6 channels per request")
 
     # Check credits
     credits = db.get_credits(user["id"])
     total = credits["free_credits"] + credits["paid_credits"]
     if total <= 0 and not user["is_admin"]:
+        logger.info(f"User {user['id']} out of credits")
         raise HTTPException(status_code=403, detail="NO_CREDITS")
-
-    if not product.product_name or not product.product_description:
-        raise HTTPException(status_code=400, detail="Product name and description are required")
 
     product_context = f"""
 产品名称：{product.product_name}
@@ -360,10 +422,15 @@ async def generate_content(product: ProductInput, user: dict = Depends(get_curre
         product_context += f"\n产品图片AI分析结果：{product.image_analysis}\n"
 
     results = []
+    success_count = 0
+    fail_count = 0
+
     for channel in product.channels:
         if channel not in CHANNEL_PROMPTS:
+            logger.warning(f"Unknown channel requested: {channel}")
             continue
         system_prompt = CHANNEL_PROMPTS[channel]
+        start_time = time.time()
         try:
             response = get_ai_client().chat.completions.create(
                 model=OPENROUTER_MODEL,
@@ -374,15 +441,53 @@ async def generate_content(product: ProductInput, user: dict = Depends(get_curre
                 temperature=0.8,
                 max_tokens=1500,
             )
-            content = response.choices[0].message.content or ""
+
+            # Safely extract content — guard against empty/missing choices
+            if not response.choices or len(response.choices) == 0:
+                logger.error(f"AI returned empty choices for channel={channel}")
+                content = "[Error] AI returned empty response. Please try again."
+                fail_count += 1
+            elif not response.choices[0].message:
+                logger.error(f"AI returned empty message for channel={channel}")
+                content = "[Error] AI returned empty message. Please try again."
+                fail_count += 1
+            else:
+                content = response.choices[0].message.content or ""
+                if not content.strip():
+                    content = "[Error] AI returned blank content. Please try again."
+                    fail_count += 1
+                else:
+                    success_count += 1
+
+            elapsed = round(time.time() - start_time, 2)
+            logger.info(f"Channel={channel} | {elapsed}s | {len(content)} chars")
+
+        except APITimeoutError:
+            elapsed = round(time.time() - start_time, 2)
+            logger.error(f"TIMEOUT for channel={channel} after {elapsed}s")
+            content = "[Error] AI response timed out. Please try again."
+            fail_count += 1
+        except APIConnectionError as e:
+            logger.error(f"CONNECTION ERROR for channel={channel}: {e}")
+            content = "[Error] Could not connect to AI service. Please try later."
+            fail_count += 1
+        except APIStatusError as e:
+            logger.error(f"API ERROR for channel={channel}: status={e.status_code} body={e.body}")
+            content = f"[Error] AI service error (status {e.status_code}). Please try later."
+            fail_count += 1
         except Exception as e:
-            content = f"Generation failed: {str(e)}"
+            logger.error(f"UNEXPECTED ERROR for channel={channel}: {type(e).__name__}: {e}")
+            content = f"[Error] Generation failed: {str(e)}"
+            fail_count += 1
+
         results.append({
             "channel": channel,
             "channel_label_zh": CHANNEL_LABELS.get(channel, {}).get("zh", channel),
             "channel_label_en": CHANNEL_LABELS.get(channel, {}).get("en", channel),
             "content": content,
         })
+
+    logger.info(f"Generate complete | user={user['id']} | success={success_count} fail={fail_count}")
 
     # Deduct credit and save history
     if not user["is_admin"]:
@@ -394,16 +499,21 @@ async def generate_content(product: ProductInput, user: dict = Depends(get_curre
     return {"results": results, "credits": updated_credits}
 
 
-# ── Image analysis endpoint ──
+# ── Image analysis endpoint (production-hardened) ──
 
 @app.post("/api/analyze-image")
 async def analyze_image(file: UploadFile = File(...), user: dict = Depends(get_current_user)):
+    logger.info(f"Image upload | user={user['id']} | filename={file.filename}")
+
     if not os.getenv("OPENROUTER_API_KEY"):
         raise HTTPException(status_code=500, detail="OPENROUTER_API_KEY not configured")
 
     content = await file.read()
+    file_size_mb = round(len(content) / 1024 / 1024, 2)
     if len(content) > 10 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="Image too large (max 10MB)")
+
+    logger.info(f"Image size: {file_size_mb}MB")
 
     # Save file
     ext = file.filename.split(".")[-1] if file.filename and "." in file.filename else "jpg"
@@ -416,6 +526,7 @@ async def analyze_image(file: UploadFile = File(...), user: dict = Depends(get_c
     b64_image = base64.b64encode(content).decode("utf-8")
     mime = file.content_type or "image/jpeg"
 
+    start_time = time.time()
     try:
         response = get_ai_client().chat.completions.create(
             model=OPENROUTER_VISION_MODEL,
@@ -444,15 +555,32 @@ async def analyze_image(file: UploadFile = File(...), user: dict = Depends(get_c
             ],
             max_tokens=800,
         )
+
+        # Safely extract response
+        if not response.choices or len(response.choices) == 0 or not response.choices[0].message:
+            raise ValueError("Vision model returned empty response")
+
         analysis_text = response.choices[0].message.content or "{}"
+        elapsed = round(time.time() - start_time, 2)
+        logger.info(f"Image analysis complete | {elapsed}s | {len(analysis_text)} chars")
+
         # Try to parse JSON from the response
         analysis_text = analysis_text.strip()
         if analysis_text.startswith("```"):
             analysis_text = analysis_text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
         analysis = json.loads(analysis_text)
+
     except json.JSONDecodeError:
+        logger.warning(f"Could not parse JSON from vision response, using raw text")
         analysis = {"product_description": analysis_text}
+    except APITimeoutError:
+        logger.error("Image analysis timed out")
+        raise HTTPException(status_code=504, detail="Image analysis timed out. Please try a smaller image.")
+    except APIConnectionError:
+        logger.error("Could not connect to AI for image analysis")
+        raise HTTPException(status_code=502, detail="Could not connect to AI service.")
     except Exception as e:
+        logger.error(f"Image analysis failed: {type(e).__name__}: {e}")
         raise HTTPException(status_code=500, detail=f"Image analysis failed: {str(e)}")
 
     return {"analysis": analysis, "filename": filename}
@@ -481,6 +609,7 @@ class BrandProfileInput(BaseModel):
 @app.post("/api/brands")
 async def create_brand(data: BrandProfileInput, user: dict = Depends(get_current_user)):
     profile_id = db.save_brand_profile(user["id"], data.dict())
+    logger.info(f"Brand profile saved | user={user['id']} | name={data.profile_name}")
     return {"id": profile_id, "message": "Brand profile saved"}
 
 
@@ -526,6 +655,7 @@ class AddCreditsInput(BaseModel):
 @app.post("/api/admin/add-credits")
 async def admin_add_credits(data: AddCreditsInput, user: dict = Depends(require_admin)):
     db.add_credits(data.user_id, data.amount)
+    logger.info(f"Admin {user['id']} added {data.amount} credits to user {data.user_id}")
     return {"message": f"Added {data.amount} credits to user {data.user_id}"}
 
 
@@ -536,7 +666,12 @@ async def list_channels():
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "model": OPENROUTER_MODEL,
+        "vision_model": OPENROUTER_VISION_MODEL,
+        "api_key_set": bool(os.getenv("OPENROUTER_API_KEY")),
+    }
 
 
 # ── Serve frontend ──
@@ -551,6 +686,21 @@ async def serve_index():
 
 # Serve uploaded images
 app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
+
+# ── Startup log ──
+
+@app.on_event("startup")
+async def startup_log():
+    port = os.environ.get("PORT", "8000")
+    logger.info("=" * 50)
+    logger.info("FlowCopy server starting")
+    logger.info(f"  PORT: {port}")
+    logger.info(f"  MODEL: {OPENROUTER_MODEL}")
+    logger.info(f"  VISION: {OPENROUTER_VISION_MODEL}")
+    logger.info(f"  API KEY: {'SET' if os.getenv('OPENROUTER_API_KEY') else 'MISSING!'}")
+    logger.info(f"  ADMIN: {ADMIN_EMAIL}")
+    logger.info(f"  TIMEOUT: {AI_TIMEOUT}s")
+    logger.info("=" * 50)
 
 
 if __name__ == "__main__":
