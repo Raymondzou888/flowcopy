@@ -57,17 +57,31 @@ def hash_password(password: str) -> str:
 def verify_password(password: str, hashed: str) -> bool:
     return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
 
-# Lazy-init: don't crash on startup if key is missing
-_openai_client = None
+# ── AI Client (OpenRouter - free models) ──
+# OpenRouter is OpenAI-SDK compatible, just different base_url + model names
 
-def get_openai_client() -> OpenAI:
-    global _openai_client
-    api_key = os.getenv("OPENAI_API_KEY")
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "mistralai/mistral-7b-instruct:free")
+OPENROUTER_VISION_MODEL = os.getenv("OPENROUTER_VISION_MODEL", "google/gemini-2.0-flash-exp:free")
+
+_ai_client = None
+
+def get_ai_client() -> OpenAI:
+    """Lazy-init OpenRouter client (OpenAI-compatible)."""
+    global _ai_client
+    api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
-        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured on server")
-    if _openai_client is None:
-        _openai_client = OpenAI(api_key=api_key)
-    return _openai_client
+        raise HTTPException(status_code=500, detail="OPENROUTER_API_KEY not configured on server")
+    if _ai_client is None:
+        _ai_client = OpenAI(
+            base_url=OPENROUTER_BASE_URL,
+            api_key=api_key,
+            default_headers={
+                "HTTP-Referer": os.getenv("APP_URL", "https://flowcopy.app"),
+                "X-Title": "FlowCopy",
+            },
+        )
+    return _ai_client
 
 
 def create_token(user_id: int, email: str) -> str:
@@ -321,8 +335,8 @@ class ProductInput(BaseModel):
 
 @app.post("/api/generate")
 async def generate_content(product: ProductInput, user: dict = Depends(get_current_user)):
-    if not os.getenv("OPENAI_API_KEY"):
-        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured")
+    if not os.getenv("OPENROUTER_API_KEY"):
+        raise HTTPException(status_code=500, detail="OPENROUTER_API_KEY not configured")
 
     # Check credits
     credits = db.get_credits(user["id"])
@@ -351,8 +365,8 @@ async def generate_content(product: ProductInput, user: dict = Depends(get_curre
             continue
         system_prompt = CHANNEL_PROMPTS[channel]
         try:
-            response = get_openai_client().chat.completions.create(
-                model="gpt-4o-mini",
+            response = get_ai_client().chat.completions.create(
+                model=OPENROUTER_MODEL,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": f"请根据以下产品信息生成内容：\n{product_context}"},
@@ -384,8 +398,8 @@ async def generate_content(product: ProductInput, user: dict = Depends(get_curre
 
 @app.post("/api/analyze-image")
 async def analyze_image(file: UploadFile = File(...), user: dict = Depends(get_current_user)):
-    if not os.getenv("OPENAI_API_KEY"):
-        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured")
+    if not os.getenv("OPENROUTER_API_KEY"):
+        raise HTTPException(status_code=500, detail="OPENROUTER_API_KEY not configured")
 
     content = await file.read()
     if len(content) > 10 * 1024 * 1024:
@@ -398,13 +412,13 @@ async def analyze_image(file: UploadFile = File(...), user: dict = Depends(get_c
     with open(filepath, "wb") as f:
         f.write(content)
 
-    # Analyze with GPT-4o vision
+    # Analyze with vision model via OpenRouter
     b64_image = base64.b64encode(content).decode("utf-8")
     mime = file.content_type or "image/jpeg"
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
+        response = get_ai_client().chat.completions.create(
+            model=OPENROUTER_VISION_MODEL,
             messages=[
                 {
                     "role": "user",
