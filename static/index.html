@@ -1,0 +1,806 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FlowCopy - AI Marketing Content Generator</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Tailwind class hints (ensures JIT finds classes in script tags) -->
+  <div class="hidden grid-cols-1 grid-cols-2 md:grid-cols-2 md:grid-cols-5 col-span-2 md:col-span-2 gap-2 gap-3 gap-4 gap-6 space-y-3 space-y-4 overflow-x-auto whitespace-nowrap sm:inline"></div>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif; background: #0f0f1a; color: #e2e8f0; }
+    .gradient-text { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .card-glow { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); backdrop-filter: blur(10px); }
+    .card-glow:hover { border-color: rgba(102,126,234,0.3); }
+    .btn-primary { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); transition: all 0.3s ease; }
+    .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 8px 25px rgba(102,126,234,0.4); }
+    .btn-primary:disabled { opacity: 0.5; transform: none; box-shadow: none; cursor: not-allowed; }
+    .channel-chip { transition: all 0.2s ease; cursor: pointer; user-select: none; }
+    .channel-chip.selected { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-color: transparent; color: white; }
+    .result-card { background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; }
+    @keyframes pulse-slow { 0%,100%{opacity:0.4} 50%{opacity:1} }
+    .loading-dot { animation: pulse-slow 1.5s ease-in-out infinite; display: inline-block; width: 8px; height: 8px; background: white; border-radius: 50%; }
+    .loading-dot:nth-child(2) { animation-delay: 0.3s; }
+    .loading-dot:nth-child(3) { animation-delay: 0.6s; }
+    textarea, input[type="text"], input[type="email"], input[type="password"] { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: #e2e8f0; transition: border-color 0.2s; }
+    textarea:focus, input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 2px rgba(102,126,234,0.2); }
+    .tab-active { border-bottom: 2px solid #667eea; color: #667eea; }
+    .drop-zone { border: 2px dashed rgba(255,255,255,0.15); transition: all 0.3s; }
+    .drop-zone:hover, .drop-zone.dragover { border-color: #667eea; background: rgba(102,126,234,0.05); }
+    .modal-overlay { background: rgba(0,0,0,0.7); backdrop-filter: blur(4px); }
+    .stat-card { background: linear-gradient(135deg, rgba(102,126,234,0.15), rgba(118,75,162,0.15)); border: 1px solid rgba(102,126,234,0.2); }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useCallback, useRef } = React;
+
+    // ── i18n ──
+    const T = {
+      zh: {
+        brand: "FlowCopy", tagline: "AI全渠道营销文案生成器",
+        hero_title_1: "一次输入，", hero_title_2: "全渠道内容", hero_title_3: "即刻生成",
+        hero_sub: "输入你的产品信息，AI同时生成小红书、抖音、淘宝、朋友圈、Google Ads、Facebook Ads的专业营销文案",
+        tab_generate: "生成文案", tab_history: "历史记录", tab_brands: "品牌档案", tab_admin: "管理后台",
+        product_info: "产品信息", product_name: "产品名称", target_audience: "目标人群",
+        product_desc: "产品描述", selling_points: "核心卖点", price_info: "价格信息", brand_voice: "品牌调性",
+        ph_name: "例：氨基酸洁面慕斯", ph_audience: "例：18-30岁敏感肌女性",
+        ph_desc: "详细描述你的产品，包括功能、成分、使用场景等...",
+        ph_points: "用逗号分隔，例：温和不刺激, 氨基酸配方, 30秒绵密泡沫",
+        ph_price: "例：日常价89元，活动价59元", ph_voice: "例：年轻活力、专业可信赖",
+        upload_title: "上传产品图片", upload_desc: "拖拽或点击上传产品图片，AI自动识别并填写产品信息",
+        upload_btn: "选择图片", analyzing: "AI正在分析图片...", analysis_done: "AI分析完成，已自动填入产品信息",
+        select_channels: "选择渠道", select_hint: "（点击选择/取消）",
+        generate_btn: "一键生成 {n} 个渠道文案", generating: "AI正在生成 {n} 个渠道的文案...",
+        results_title: "生成结果", copy_btn: "复制文案", copied: "已复制 ✓",
+        credits_label: "剩余额度", credits_free: "免费", credits_paid: "付费",
+        no_credits_title: "额度已用完", no_credits_desc: "您的免费额度已用完。请联系管理员购买更多额度。",
+        no_credits_contact: "联系购买", no_credits_wechat: "添加微信：",
+        login: "登录", register: "注册", logout: "退出", email: "邮箱", password: "密码",
+        display_name: "昵称（选填）", login_btn: "登录", register_btn: "注册",
+        switch_to_register: "没有账号？注册", switch_to_login: "已有账号？登录",
+        or_divider: "或", google_login: "使用 Google 账号登录", guest_trial: "免注册试用（2次额度）", guest_note: "试用账号无法保存数据，建议注册",
+        history_empty: "暂无生成记录", history_product: "产品", history_channels: "渠道", history_time: "时间",
+        brand_save: "保存当前为品牌档案", brand_name: "档案名称", brand_ph: "例：我的护肤品牌",
+        brand_save_btn: "保存", brand_load: "加载", brand_delete: "删除", brand_empty: "暂无保存的品牌档案",
+        admin_stats: "数据概览", admin_total_users: "总用户数", admin_today_users: "今日新增",
+        admin_total_gen: "总生成次数", admin_today_gen: "今日生成", admin_active: "活跃用户",
+        admin_users: "用户管理", admin_add_credits: "充值", admin_credits_amount: "充值数量",
+        admin_confirm: "确认充值", required: "*",
+        xiaohongshu: "小红书", douyin: "抖音脚本", taobao: "淘宝详情页",
+        wechat_moments: "朋友圈", google_ads: "Google Ads", facebook_ads: "Facebook Ads",
+      },
+      en: {
+        brand: "FlowCopy", tagline: "AI Multi-Channel Marketing Content Generator",
+        hero_title_1: "One Input, ", hero_title_2: "All Channels", hero_title_3: " Instantly",
+        hero_sub: "Enter your product info and AI generates professional marketing copy for Xiaohongshu, Douyin, Taobao, WeChat, Google Ads, and Facebook Ads simultaneously",
+        tab_generate: "Generate", tab_history: "History", tab_brands: "Brand Profiles", tab_admin: "Admin",
+        product_info: "Product Info", product_name: "Product Name", target_audience: "Target Audience",
+        product_desc: "Product Description", selling_points: "Key Selling Points", price_info: "Price Info", brand_voice: "Brand Voice",
+        ph_name: "e.g. Amino Acid Facial Cleanser", ph_audience: "e.g. Women aged 18-30 with sensitive skin",
+        ph_desc: "Describe your product in detail: features, ingredients, use cases...",
+        ph_points: "Comma separated, e.g. Gentle formula, Deep cleansing, Sensitive skin friendly",
+        ph_price: "e.g. Regular $12.99, Sale $8.99", ph_voice: "e.g. Young & vibrant, Professional",
+        upload_title: "Upload Product Image", upload_desc: "Drag & drop or click to upload. AI will analyze and auto-fill product info.",
+        upload_btn: "Choose Image", analyzing: "AI is analyzing the image...", analysis_done: "AI analysis complete. Product info auto-filled!",
+        select_channels: "Select Channels", select_hint: "(click to toggle)",
+        generate_btn: "Generate for {n} Channels", generating: "AI is generating content for {n} channels...",
+        results_title: "Results", copy_btn: "Copy", copied: "Copied ✓",
+        credits_label: "Credits", credits_free: "Free", credits_paid: "Paid",
+        no_credits_title: "Out of Credits", no_credits_desc: "Your free credits are used up. Contact admin to purchase more.",
+        no_credits_contact: "Contact to Buy", no_credits_wechat: "WeChat ID:",
+        login: "Login", register: "Register", logout: "Logout", email: "Email", password: "Password",
+        display_name: "Display Name (optional)", login_btn: "Login", register_btn: "Register",
+        switch_to_register: "No account? Register", switch_to_login: "Have an account? Login",
+        or_divider: "or", google_login: "Sign in with Google", guest_trial: "Try without signing up (2 credits)", guest_note: "Guest data is not saved. Register for full access.",
+        history_empty: "No generation history yet", history_product: "Product", history_channels: "Channels", history_time: "Time",
+        brand_save: "Save as Brand Profile", brand_name: "Profile Name", brand_ph: "e.g. My Skincare Brand",
+        brand_save_btn: "Save", brand_load: "Load", brand_delete: "Delete", brand_empty: "No saved brand profiles",
+        admin_stats: "Dashboard", admin_total_users: "Total Users", admin_today_users: "New Today",
+        admin_total_gen: "Total Generations", admin_today_gen: "Today's Gen", admin_active: "Active Users",
+        admin_users: "User Management", admin_add_credits: "Add Credits", admin_credits_amount: "Amount",
+        admin_confirm: "Confirm", required: "*",
+        xiaohongshu: "Xiaohongshu", douyin: "Douyin Script", taobao: "Taobao Detail",
+        wechat_moments: "WeChat Moments", google_ads: "Google Ads", facebook_ads: "Facebook Ads",
+      },
+    };
+
+    const CHANNELS = [
+      { id: 'xiaohongshu', icon: '📕' },
+      { id: 'douyin', icon: '🎵' },
+      { id: 'taobao', icon: '🛒' },
+      { id: 'wechat_moments', icon: '💬' },
+      { id: 'google_ads', icon: '🔍' },
+      { id: 'facebook_ads', icon: '📘' },
+    ];
+
+    const API = (path, opts = {}) => {
+      const token = localStorage.getItem('fc_token');
+      const headers = { ...(opts.headers || {}) };
+      if (token) headers['Authorization'] = 'Bearer ' + token;
+      if (!(opts.body instanceof FormData)) headers['Content-Type'] = 'application/json';
+      return fetch(path, { ...opts, headers });
+    };
+
+    // ── Auth Modal ──
+    function AuthModal({ lang, onLogin }) {
+      const t = T[lang];
+      const [mode, setMode] = useState('login');
+      const [email, setEmail] = useState('');
+      const [password, setPassword] = useState('');
+      const [name, setName] = useState('');
+      const [error, setError] = useState('');
+      const [loading, setLoading] = useState(false);
+      const [googleClientId, setGoogleClientId] = useState('');
+      const googleBtnRef = useRef(null);
+
+      // Load Google client ID
+      useEffect(() => {
+        fetch('/api/auth/google-client-id').then(r => r.json()).then(d => {
+          if (d.client_id) setGoogleClientId(d.client_id);
+        }).catch(() => {});
+      }, []);
+
+      // Initialize Google Sign-In button
+      useEffect(() => {
+        if (!googleClientId || !window.google || !googleBtnRef.current) return;
+        try {
+          window.google.accounts.id.initialize({
+            client_id: googleClientId,
+            callback: async (response) => {
+              setLoading(true); setError('');
+              try {
+                const res = await fetch('/api/auth/google', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ credential: response.credential }),
+                });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.detail || 'Error');
+                localStorage.setItem('fc_token', data.token);
+                onLogin(data.user);
+              } catch (err) {
+                setError(err.message);
+              } finally {
+                setLoading(false);
+              }
+            },
+          });
+          window.google.accounts.id.renderButton(googleBtnRef.current, {
+            theme: 'filled_black', size: 'large', width: '100%', text: 'signin_with',
+            locale: lang === 'zh' ? 'zh-CN' : 'en',
+          });
+        } catch (e) { console.log('Google Sign-In init error:', e); }
+      }, [googleClientId, mode, lang]);
+
+      const submit = async (e) => {
+        e.preventDefault();
+        setError(''); setLoading(true);
+        try {
+          const endpoint = mode === 'login' ? '/api/login' : '/api/register';
+          const body = mode === 'login' ? { email, password } : { email, password, display_name: name };
+          const res = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.detail || 'Error');
+          localStorage.setItem('fc_token', data.token);
+          onLogin(data.user);
+        } catch (err) {
+          setError(err.message);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      const guestLogin = async () => {
+        setLoading(true); setError('');
+        try {
+          const res = await fetch('/api/auth/guest', { method: 'POST' });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.detail || 'Error');
+          localStorage.setItem('fc_token', data.token);
+          onLogin(data.user);
+        } catch (err) {
+          setError(err.message);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      return (
+        <div className="modal-overlay fixed inset-0 flex items-center justify-center z-50 overflow-y-auto py-8">
+          <div className="card-glow rounded-2xl p-8 w-full max-w-md mx-4">
+            <div className="text-center mb-6">
+              <div className="flex items-center justify-center gap-2 mb-2">
+                <div className="w-10 h-10 rounded-xl btn-primary flex items-center justify-center text-white font-bold">F</div>
+                <span className="text-2xl font-bold gradient-text">FlowCopy</span>
+              </div>
+              <p className="text-gray-400 text-sm">{t.tagline}</p>
+            </div>
+
+            {/* Google Sign-In */}
+            {googleClientId && (
+              <div className="mb-4">
+                <div ref={googleBtnRef} className="flex justify-center"></div>
+              </div>
+            )}
+
+            {/* Guest Trial */}
+            <button onClick={guestLogin} disabled={loading}
+              className="w-full py-2.5 rounded-xl border border-white/10 text-gray-400 hover:text-white hover:border-white/30 text-sm mb-4 transition-colors">
+              🎯 {t.guest_trial}
+            </button>
+
+            {/* Divider */}
+            <div className="flex items-center gap-3 mb-4">
+              <div className="flex-1 h-px bg-white/10"></div>
+              <span className="text-xs text-gray-500">{t.or_divider}</span>
+              <div className="flex-1 h-px bg-white/10"></div>
+            </div>
+
+            {/* Email/Password form */}
+            <form onSubmit={submit}>
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">{t.email} {t.required}</label>
+                  <input type="email" required className="w-full rounded-lg px-4 py-2.5 text-sm" value={email} onChange={e => setEmail(e.target.value)} placeholder="you@example.com" />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">{t.password} {t.required}</label>
+                  <input type="password" required minLength={6} className="w-full rounded-lg px-4 py-2.5 text-sm" value={password} onChange={e => setPassword(e.target.value)} placeholder="••••••" />
+                </div>
+                {mode === 'register' && (
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1">{t.display_name}</label>
+                    <input type="text" className="w-full rounded-lg px-4 py-2.5 text-sm" value={name} onChange={e => setName(e.target.value)} />
+                  </div>
+                )}
+                {error && <p className="text-red-400 text-sm">{error}</p>}
+                <button type="submit" disabled={loading} className="btn-primary w-full py-2.5 rounded-xl text-white font-semibold text-sm">
+                  {loading ? '...' : (mode === 'login' ? t.login_btn : t.register_btn)}
+                </button>
+              </div>
+            </form>
+
+            <p className="text-center text-sm text-gray-500 mt-3 cursor-pointer hover:text-gray-300" onClick={() => { setMode(mode === 'login' ? 'register' : 'login'); setError(''); }}>
+              {mode === 'login' ? t.switch_to_register : t.switch_to_login}
+            </p>
+
+            <p className="text-center text-xs text-gray-600 mt-3">{t.guest_note}</p>
+          </div>
+        </div>
+      );
+    }
+
+    // ── No Credits Modal ──
+    function NoCreditsModal({ lang, onClose }) {
+      const t = T[lang];
+      return (
+        <div className="modal-overlay fixed inset-0 flex items-center justify-center z-50" onClick={onClose}>
+          <div className="card-glow rounded-2xl p-8 w-full max-w-md mx-4 text-center" onClick={e => e.stopPropagation()}>
+            <div className="text-5xl mb-4">🔒</div>
+            <h3 className="text-xl font-bold mb-2">{t.no_credits_title}</h3>
+            <p className="text-gray-400 mb-6">{t.no_credits_desc}</p>
+            <div className="card-glow rounded-xl p-4 mb-6">
+              <p className="text-sm text-gray-300 mb-2">{t.no_credits_wechat}</p>
+              <p className="text-lg font-bold gradient-text">FlowCopy_Support</p>
+            </div>
+            <button onClick={onClose} className="text-gray-500 hover:text-gray-300 text-sm">{lang === 'zh' ? '关闭' : 'Close'}</button>
+          </div>
+        </div>
+      );
+    }
+
+    // ── Image Upload ──
+    function ImageUpload({ lang, onAnalysis }) {
+      const t = T[lang];
+      const [dragging, setDragging] = useState(false);
+      const [analyzing, setAnalyzing] = useState(false);
+      const [done, setDone] = useState(false);
+      const [preview, setPreview] = useState(null);
+      const fileRef = useRef();
+
+      const handleFile = async (file) => {
+        if (!file || !file.type.startsWith('image/')) return;
+        setPreview(URL.createObjectURL(file));
+        setAnalyzing(true); setDone(false);
+        const formData = new FormData();
+        formData.append('file', file);
+        try {
+          const res = await API('/api/analyze-image', { method: 'POST', body: formData, headers: {} });
+          const data = await res.json();
+          if (res.ok && data.analysis) {
+            onAnalysis(data.analysis);
+            setDone(true);
+          }
+        } catch (err) {
+          console.error(err);
+        } finally {
+          setAnalyzing(false);
+        }
+      };
+
+      return (
+        <div className="card-glow rounded-2xl p-6 mb-6">
+          <h3 className="text-base font-semibold mb-4 flex items-center gap-2">📷 {t.upload_title}</h3>
+          <div
+            className={`drop-zone rounded-xl p-6 text-center cursor-pointer ${dragging ? 'dragover' : ''}`}
+            onClick={() => fileRef.current?.click()}
+            onDragOver={e => { e.preventDefault(); setDragging(true); }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={e => { e.preventDefault(); setDragging(false); handleFile(e.dataTransfer.files[0]); }}
+          >
+            {preview ? (
+              <div>
+                <img src={preview} className="max-h-32 mx-auto rounded-lg mb-3" alt="preview" />
+                {analyzing && <p className="text-yellow-400 text-sm">{t.analyzing}</p>}
+                {done && <p className="text-green-400 text-sm">{t.analysis_done}</p>}
+              </div>
+            ) : (
+              <div>
+                <div className="text-3xl mb-2">📤</div>
+                <p className="text-gray-400 text-sm">{t.upload_desc}</p>
+              </div>
+            )}
+            <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={e => handleFile(e.target.files[0])} />
+          </div>
+        </div>
+      );
+    }
+
+    // ── History Tab ──
+    function HistoryTab({ lang }) {
+      const t = T[lang];
+      const [history, setHistory] = useState([]);
+      const [expanded, setExpanded] = useState(null);
+      const [copiedKey, setCopiedKey] = useState(null);
+
+      useEffect(() => {
+        API('/api/history').then(r => r.json()).then(d => setHistory(d.generations || []));
+      }, []);
+
+      const copyText = (text, key) => { navigator.clipboard.writeText(text); setCopiedKey(key); setTimeout(() => setCopiedKey(null), 2000); };
+
+      if (history.length === 0) return <div className="text-center text-gray-500 py-20">{t.history_empty}</div>;
+
+      return (
+        <div className="space-y-4">
+          {history.map((gen, i) => (
+            <div key={gen.id} className="card-glow rounded-xl p-5">
+              <div className="flex items-center justify-between cursor-pointer" onClick={() => setExpanded(expanded === i ? null : i)}>
+                <div>
+                  <span className="font-semibold">{gen.product_name}</span>
+                  <span className="text-gray-500 text-sm ml-3">{gen.channels.map(c => T[lang][c] || c).join(', ')}</span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="text-gray-500 text-xs">{gen.created_at}</span>
+                  <span className="text-gray-500">{expanded === i ? '▲' : '▼'}</span>
+                </div>
+              </div>
+              {expanded === i && (
+                <div className="mt-4 space-y-4">
+                  {gen.results.map((r, j) => (
+                    <div key={j} className="result-card p-4">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="font-medium text-sm">{lang === 'zh' ? r.channel_label_zh : r.channel_label_en}</span>
+                        <button onClick={() => copyText(r.content, `${i}-${j}`)} className="text-xs px-3 py-1 rounded-lg border border-white/10 hover:border-white/30 text-gray-400 hover:text-white">
+                          {copiedKey === `${i}-${j}` ? t.copied : t.copy_btn}
+                        </button>
+                      </div>
+                      <div className="whitespace-pre-wrap text-gray-300 text-sm leading-relaxed bg-black/20 rounded-lg p-4">{r.content}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    // ── Brands Tab ──
+    function BrandsTab({ lang, onLoad }) {
+      const t = T[lang];
+      const [profiles, setProfiles] = useState([]);
+
+      useEffect(() => {
+        API('/api/brands').then(r => r.json()).then(d => setProfiles(d.profiles || []));
+      }, []);
+
+      const deleteBrand = async (id) => {
+        await API(`/api/brands/${id}`, { method: 'DELETE' });
+        setProfiles(profiles.filter(p => p.id !== id));
+      };
+
+      if (profiles.length === 0) return <div className="text-center text-gray-500 py-20">{t.brand_empty}</div>;
+
+      return (
+        <div className="space-y-3">
+          {profiles.map(p => (
+            <div key={p.id} className="card-glow rounded-xl p-5 flex items-center justify-between">
+              <div>
+                <span className="font-semibold">{p.profile_name}</span>
+                <span className="text-gray-500 text-sm ml-3">{p.product_name}</span>
+              </div>
+              <div className="flex gap-2">
+                <button onClick={() => onLoad(p)} className="text-xs px-3 py-1.5 rounded-lg btn-primary text-white">{t.brand_load}</button>
+                <button onClick={() => deleteBrand(p.id)} className="text-xs px-3 py-1.5 rounded-lg border border-red-500/30 text-red-400 hover:bg-red-500/10">{t.brand_delete}</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    // ── Admin Tab ──
+    function AdminTab({ lang }) {
+      const t = T[lang];
+      const [stats, setStats] = useState({});
+      const [users, setUsers] = useState([]);
+      const [creditUserId, setCreditUserId] = useState(null);
+      const [creditAmount, setCreditAmount] = useState(10);
+
+      useEffect(() => {
+        API('/api/admin/stats').then(r => r.json()).then(setStats);
+        API('/api/admin/users').then(r => r.json()).then(d => setUsers(d.users || []));
+      }, []);
+
+      const addCredits = async (userId) => {
+        await API('/api/admin/add-credits', { method: 'POST', body: JSON.stringify({ user_id: userId, amount: creditAmount }) });
+        setCreditUserId(null);
+        API('/api/admin/users').then(r => r.json()).then(d => setUsers(d.users || []));
+      };
+
+      return (
+        <div>
+          <h3 className="text-lg font-bold mb-4">{t.admin_stats}</h3>
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-8">
+            {[
+              [t.admin_total_users, stats.total_users, '👥'],
+              [t.admin_today_users, stats.today_users, '🆕'],
+              [t.admin_total_gen, stats.total_generations, '📝'],
+              [t.admin_today_gen, stats.today_generations, '📊'],
+              [t.admin_active, stats.active_users, '🔥'],
+            ].map(([label, val, icon], i) => (
+              <div key={i} className="stat-card rounded-xl p-4 text-center">
+                <div className="text-2xl mb-1">{icon}</div>
+                <div className="text-2xl font-bold">{val ?? '-'}</div>
+                <div className="text-xs text-gray-400 mt-1">{label}</div>
+              </div>
+            ))}
+          </div>
+
+          <h3 className="text-lg font-bold mb-4">{t.admin_users}</h3>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-gray-500 border-b border-white/10">
+                  <th className="text-left py-2 px-3">ID</th>
+                  <th className="text-left py-2 px-3">{t.email}</th>
+                  <th className="text-left py-2 px-3">{t.credits_label}</th>
+                  <th className="text-left py-2 px-3">{lang === 'zh' ? '生成次数' : 'Generations'}</th>
+                  <th className="text-left py-2 px-3">{t.history_time}</th>
+                  <th className="text-left py-2 px-3"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {users.map(u => (
+                  <tr key={u.id} className="border-b border-white/5 hover:bg-white/5">
+                    <td className="py-2 px-3">{u.id}</td>
+                    <td className="py-2 px-3">{u.email} {u.is_admin && <span className="text-xs bg-yellow-500/20 text-yellow-400 px-1.5 py-0.5 rounded">Admin</span>}</td>
+                    <td className="py-2 px-3"><span className="text-green-400">{u.free_credits}F</span> + <span className="text-blue-400">{u.paid_credits}P</span></td>
+                    <td className="py-2 px-3">{u.generation_count}</td>
+                    <td className="py-2 px-3 text-gray-500">{u.created_at}</td>
+                    <td className="py-2 px-3">
+                      {creditUserId === u.id ? (
+                        <div className="flex items-center gap-2">
+                          <input type="number" value={creditAmount} onChange={e => setCreditAmount(parseInt(e.target.value) || 0)} className="w-16 rounded px-2 py-1 text-xs" />
+                          <button onClick={() => addCredits(u.id)} className="text-xs px-2 py-1 rounded btn-primary text-white">{t.admin_confirm}</button>
+                          <button onClick={() => setCreditUserId(null)} className="text-xs text-gray-500">✕</button>
+                        </div>
+                      ) : (
+                        <button onClick={() => setCreditUserId(u.id)} className="text-xs px-3 py-1 rounded-lg border border-white/10 hover:border-white/30 text-gray-400 hover:text-white">
+                          + {t.admin_add_credits}
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      );
+    }
+
+    // ── Main App ──
+    function App() {
+      const [lang, setLang] = useState(localStorage.getItem('fc_lang') || 'zh');
+      const [user, setUser] = useState(null);
+      const [authChecked, setAuthChecked] = useState(false);
+      const [tab, setTab] = useState('generate');
+      const [showNoCredits, setShowNoCredits] = useState(false);
+
+      const [form, setForm] = useState({ product_name: '', product_description: '', target_audience: '', key_selling_points: '', price_info: '', brand_voice: '' });
+      const [imageAnalysis, setImageAnalysis] = useState('');
+      const [selectedChannels, setSelectedChannels] = useState(['xiaohongshu', 'douyin']);
+      const [results, setResults] = useState([]);
+      const [loading, setLoading] = useState(false);
+      const [copiedIdx, setCopiedIdx] = useState(null);
+      const [savingBrand, setSavingBrand] = useState(false);
+      const [brandName, setBrandName] = useState('');
+
+      const t = T[lang];
+
+      // Check existing token on mount
+      useEffect(() => {
+        const token = localStorage.getItem('fc_token');
+        if (token) {
+          API('/api/me').then(r => { if (r.ok) return r.json(); throw new Error(); })
+            .then(u => setUser(u))
+            .catch(() => localStorage.removeItem('fc_token'))
+            .finally(() => setAuthChecked(true));
+        } else {
+          setAuthChecked(true);
+        }
+      }, []);
+
+      const toggleLang = () => {
+        const newLang = lang === 'zh' ? 'en' : 'zh';
+        setLang(newLang);
+        localStorage.setItem('fc_lang', newLang);
+      };
+
+      const updateField = (field, value) => setForm(prev => ({ ...prev, [field]: value }));
+      const toggleChannel = (id) => setSelectedChannels(prev => prev.includes(id) ? prev.filter(c => c !== id) : [...prev, id]);
+
+      const handleImageAnalysis = (analysis) => {
+        const newForm = { ...form };
+        if (analysis.product_name) newForm.product_name = analysis.product_name;
+        if (analysis.product_description) newForm.product_description = analysis.product_description;
+        if (analysis.key_selling_points) newForm.key_selling_points = analysis.key_selling_points;
+        if (analysis.target_audience) newForm.target_audience = analysis.target_audience;
+        if (analysis.brand_voice) newForm.brand_voice = analysis.brand_voice;
+        setForm(newForm);
+        setImageAnalysis(JSON.stringify(analysis));
+      };
+
+      const handleGenerate = async () => {
+        if (!form.product_name || !form.product_description || !form.target_audience || !form.key_selling_points) {
+          alert(lang === 'zh' ? '请填写所有必填项' : 'Please fill all required fields'); return;
+        }
+        if (selectedChannels.length === 0) {
+          alert(lang === 'zh' ? '请至少选择一个渠道' : 'Select at least one channel'); return;
+        }
+        setLoading(true); setResults([]);
+        try {
+          const res = await API('/api/generate', {
+            method: 'POST',
+            body: JSON.stringify({ ...form, channels: selectedChannels, image_analysis: imageAnalysis }),
+          });
+          const data = await res.json();
+          if (res.status === 403 && data.detail === 'NO_CREDITS') {
+            setShowNoCredits(true);
+            return;
+          }
+          if (!res.ok) throw new Error(data.detail || 'Error');
+          setResults(data.results);
+          if (data.credits) setUser(prev => ({ ...prev, free_credits: data.credits.free_credits, paid_credits: data.credits.paid_credits }));
+        } catch (err) {
+          alert(err.message);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      const handleSaveBrand = async () => {
+        if (!brandName) return;
+        await API('/api/brands', {
+          method: 'POST',
+          body: JSON.stringify({ profile_name: brandName, ...form }),
+        });
+        setSavingBrand(false);
+        setBrandName('');
+        alert(lang === 'zh' ? '品牌档案已保存！' : 'Brand profile saved!');
+      };
+
+      const handleLoadBrand = (profile) => {
+        setForm({
+          product_name: profile.product_name || '',
+          product_description: profile.product_description || '',
+          target_audience: profile.target_audience || '',
+          key_selling_points: profile.key_selling_points || '',
+          price_info: profile.price_info || '',
+          brand_voice: profile.brand_voice || '',
+        });
+        setTab('generate');
+      };
+
+      const copyToClipboard = (text, idx) => { navigator.clipboard.writeText(text); setCopiedIdx(idx); setTimeout(() => setCopiedIdx(null), 2000); };
+
+      const handleLogout = () => { localStorage.removeItem('fc_token'); setUser(null); };
+
+      if (!authChecked) return <div className="min-h-screen flex items-center justify-center"><div className="loading-dot"></div></div>;
+      if (!user) return <AuthModal lang={lang} onLogin={setUser} />;
+
+      const totalCredits = (user.free_credits || 0) + (user.paid_credits || 0);
+
+      return (
+        <div className="min-h-screen">
+          {showNoCredits && <NoCreditsModal lang={lang} onClose={() => setShowNoCredits(false)} />}
+
+          {/* Header */}
+          <header className="border-b border-white/5 px-4 py-3">
+            <div className="max-w-5xl mx-auto flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-lg btn-primary flex items-center justify-center text-white font-bold text-sm">F</div>
+                <span className="text-lg font-bold gradient-text hidden sm:inline">FlowCopy</span>
+              </div>
+              <div className="flex items-center gap-3">
+                {/* Credits */}
+                <div className="text-xs px-3 py-1.5 rounded-full border border-white/10">
+                  {t.credits_label}: <span className={totalCredits > 0 ? 'text-green-400' : 'text-red-400'}>{totalCredits}</span>
+                </div>
+                {/* Lang toggle */}
+                <button onClick={toggleLang} className="text-sm px-2 py-1 rounded-lg border border-white/10 hover:border-white/20">
+                  {lang === 'zh' ? 'EN' : '中文'}
+                </button>
+                {/* User menu */}
+                <span className="text-xs text-gray-500 hidden sm:inline">{user.email}</span>
+                <button onClick={handleLogout} className="text-xs text-gray-500 hover:text-gray-300">{t.logout}</button>
+              </div>
+            </div>
+          </header>
+
+          {/* Tabs */}
+          <nav className="border-b border-white/5 px-4">
+            <div className="max-w-5xl mx-auto flex gap-6 overflow-x-auto">
+              {['generate', 'history', 'brands', ...(user.is_admin ? ['admin'] : [])].map(tb => (
+                <button key={tb} onClick={() => setTab(tb)}
+                  className={`py-3 text-sm whitespace-nowrap ${tab === tb ? 'tab-active font-medium' : 'text-gray-500 hover:text-gray-300'}`}>
+                  {t['tab_' + tb]}
+                </button>
+              ))}
+            </div>
+          </nav>
+
+          <main className="max-w-5xl mx-auto px-4 py-8">
+
+            {/* ── Generate Tab ── */}
+            {tab === 'generate' && (
+              <div>
+                <div className="text-center mb-8">
+                  <h2 className="text-3xl font-bold mb-3">
+                    {t.hero_title_1}<span className="gradient-text">{t.hero_title_2}</span>{t.hero_title_3}
+                  </h2>
+                  <p className="text-gray-400 max-w-2xl mx-auto text-sm">{t.hero_sub}</p>
+                </div>
+
+                {/* Image Upload */}
+                <ImageUpload lang={lang} onAnalysis={handleImageAnalysis} />
+
+                {/* Product Form */}
+                <div className="card-glow rounded-2xl p-6 mb-6">
+                  <div className="flex items-center justify-between mb-5">
+                    <h3 className="text-base font-semibold flex items-center gap-2">
+                      <span className="w-6 h-6 rounded-full btn-primary flex items-center justify-center text-xs text-white">1</span>
+                      {t.product_info}
+                    </h3>
+                    {/* Save as brand */}
+                    {!savingBrand ? (
+                      <button onClick={() => setSavingBrand(true)} className="text-xs text-gray-500 hover:text-gray-300">💾 {t.brand_save}</button>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <input type="text" value={brandName} onChange={e => setBrandName(e.target.value)} placeholder={t.brand_ph} className="rounded-lg px-3 py-1.5 text-xs w-40" />
+                        <button onClick={handleSaveBrand} className="text-xs px-3 py-1.5 rounded-lg btn-primary text-white">{t.brand_save_btn}</button>
+                        <button onClick={() => setSavingBrand(false)} className="text-xs text-gray-500">✕</button>
+                      </div>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-xs text-gray-400 mb-1">{t.product_name} {t.required}</label>
+                      <input type="text" className="w-full rounded-lg px-3 py-2.5 text-sm" placeholder={t.ph_name} value={form.product_name} onChange={e => updateField('product_name', e.target.value)} />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-gray-400 mb-1">{t.target_audience} {t.required}</label>
+                      <input type="text" className="w-full rounded-lg px-3 py-2.5 text-sm" placeholder={t.ph_audience} value={form.target_audience} onChange={e => updateField('target_audience', e.target.value)} />
+                    </div>
+                    <div className="md:col-span-2">
+                      <label className="block text-xs text-gray-400 mb-1">{t.product_desc} {t.required}</label>
+                      <textarea className="w-full rounded-lg px-3 py-2.5 text-sm h-20 resize-none" placeholder={t.ph_desc} value={form.product_description} onChange={e => updateField('product_description', e.target.value)} />
+                    </div>
+                    <div className="md:col-span-2">
+                      <label className="block text-xs text-gray-400 mb-1">{t.selling_points} {t.required}</label>
+                      <textarea className="w-full rounded-lg px-3 py-2.5 text-sm h-16 resize-none" placeholder={t.ph_points} value={form.key_selling_points} onChange={e => updateField('key_selling_points', e.target.value)} />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-gray-400 mb-1">{t.price_info}</label>
+                      <input type="text" className="w-full rounded-lg px-3 py-2.5 text-sm" placeholder={t.ph_price} value={form.price_info} onChange={e => updateField('price_info', e.target.value)} />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-gray-400 mb-1">{t.brand_voice}</label>
+                      <input type="text" className="w-full rounded-lg px-3 py-2.5 text-sm" placeholder={t.ph_voice} value={form.brand_voice} onChange={e => updateField('brand_voice', e.target.value)} />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Channel Selection */}
+                <div className="card-glow rounded-2xl p-6 mb-6">
+                  <h3 className="text-base font-semibold mb-4 flex items-center gap-2">
+                    <span className="w-6 h-6 rounded-full btn-primary flex items-center justify-center text-xs text-white">2</span>
+                    {t.select_channels} <span className="text-xs text-gray-500 font-normal ml-2">{t.select_hint}</span>
+                  </h3>
+                  <div className="flex flex-wrap gap-2">
+                    {CHANNELS.map(ch => (
+                      <button key={ch.id} onClick={() => toggleChannel(ch.id)}
+                        className={`channel-chip px-4 py-2 rounded-full border text-sm ${selectedChannels.includes(ch.id) ? 'selected' : 'border-white/10 text-gray-400 hover:border-white/20'}`}>
+                        {ch.icon} {t[ch.id]}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Generate Button */}
+                <button onClick={handleGenerate} disabled={loading} className="btn-primary w-full py-3.5 rounded-xl text-white font-semibold text-base mb-8">
+                  {loading ? (
+                    <span className="flex items-center justify-center gap-2">
+                      <span className="loading-dot"></span><span className="loading-dot"></span><span className="loading-dot"></span>
+                      <span className="ml-2">{t.generating.replace('{n}', selectedChannels.length)}</span>
+                    </span>
+                  ) : t.generate_btn.replace('{n}', selectedChannels.length)}
+                </button>
+
+                {/* Results */}
+                {results.length > 0 && (
+                  <div>
+                    <h3 className="text-xl font-bold mb-4 gradient-text">{t.results_title}</h3>
+                    <div className="space-y-4">
+                      {results.map((r, idx) => (
+                        <div key={idx} className="result-card p-5">
+                          <div className="flex items-center justify-between mb-3">
+                            <h4 className="font-semibold flex items-center gap-2">
+                              <span>{CHANNELS.find(c => c.id === r.channel)?.icon}</span>
+                              {lang === 'zh' ? r.channel_label_zh : r.channel_label_en}
+                            </h4>
+                            <button onClick={() => copyToClipboard(r.content, idx)}
+                              className="text-sm px-3 py-1 rounded-lg border border-white/10 hover:border-white/30 text-gray-400 hover:text-white">
+                              {copiedIdx === idx ? t.copied : t.copy_btn}
+                            </button>
+                          </div>
+                          <div className="whitespace-pre-wrap text-gray-300 text-sm leading-relaxed bg-black/20 rounded-lg p-4">{r.content}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ── History Tab ── */}
+            {tab === 'history' && <HistoryTab lang={lang} />}
+
+            {/* ── Brands Tab ── */}
+            {tab === 'brands' && <BrandsTab lang={lang} onLoad={handleLoadBrand} />}
+
+            {/* ── Admin Tab ── */}
+            {tab === 'admin' && user.is_admin && <AdminTab lang={lang} />}
+
+          </main>
+
+          <footer className="text-center text-gray-600 text-xs py-6">
+            FlowCopy &copy; 2026 &mdash; {t.tagline}
+          </footer>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
