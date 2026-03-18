@@ -57,7 +57,17 @@ def hash_password(password: str) -> str:
 def verify_password(password: str, hashed: str) -> bool:
     return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# Lazy-init: don't crash on startup if key is missing
+_openai_client = None
+
+def get_openai_client() -> OpenAI:
+    global _openai_client
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured on server")
+    if _openai_client is None:
+        _openai_client = OpenAI(api_key=api_key)
+    return _openai_client
 
 
 def create_token(user_id: int, email: str) -> str:
@@ -341,7 +351,7 @@ async def generate_content(product: ProductInput, user: dict = Depends(get_curre
             continue
         system_prompt = CHANNEL_PROMPTS[channel]
         try:
-            response = client.chat.completions.create(
+            response = get_openai_client().chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -531,4 +541,5 @@ app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
